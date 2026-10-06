@@ -1,0 +1,29 @@
+[stt]
+model_path = "/path/to/your/ASR/like/Qwen3-ASR-0.6B-4bit"
+
+[llm]
+enabled = true
+model = "gemma4:31b-cloud"
+url = "http://localhost:11434/v1/chat/completions"
+api_key = ""
+timeout = 30.0
+prompt = """
+以下是通过STT服务生成的内容，如果有错误请改正，只用返回最终的结果，不需要解释:
+
+{text}
+"""
+
+[audio]
+sample_rate = 16000
+channels = 1
+max_recording_seconds = 60.0
+min_recording_seconds = 0.2
+type_char_delay = 0.02
+
+[hotkey]
+dictation_keycode = 176
+
+[sounds]
+start = "/System/Library/Sounds/Pop.aiff"
+stop = "/System/Library/Sounds/Ping.aiff"
+busy = "/System/Library/Sounds/Basso.aiff"
