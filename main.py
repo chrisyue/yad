@@ -16,12 +16,7 @@ import CoreFoundation
 from mlx_audio.stt import load as load_model
 
 
-# ---------------- 读取配置 ----------------
-
 CONFIG_PATH = Path(__file__).with_name("config.toml")
-if not CONFIG_PATH.exists():
-    raise SystemExit(f"找不到配置文件: {CONFIG_PATH}")
-
 with CONFIG_PATH.open("rb") as f:
     config = tomllib.load(f)
 
@@ -47,8 +42,6 @@ BEEP_STOP = config["sounds"]["stop"]
 BEEP_BUSY = config["sounds"]["busy"]
 
 
-# ---------------- 逻辑代码 ----------------
-
 def beep(path):
     subprocess.Popen(["afplay", path])
 
@@ -59,6 +52,8 @@ recording_timer = None
 processing_thread = None
 audio_chunks = deque()
 event_tap = None
+dict_key_down = False
+recording = False
 
 
 def log(message):
@@ -73,7 +68,9 @@ def load_models():
 
 
 def run_stt(audio):
-    result = stt_model.generate(audio, use_itn=True)
+    result = stt_model.generate(
+        audio, use_itn=True, system_prompt="用户是程序员。Vocabulary: ornith, bonsai"
+    )
     if isinstance(result, str):
         return result
     if hasattr(result, "text"):
@@ -87,8 +84,16 @@ def audio_callback(indata, frames, time_info, status):
     audio_chunks.append(indata.copy())
 
 
+def log_zombie_threads():
+    n = sum(1 for t in threading.enumerate() if t.name == "stream-close")
+    if n:
+        log(f"僵尸 close 线程: {n}")
+
+
 def start_recording():
-    global stream, recording_timer
+    global recording, stream, recording_timer
+    recording = True
+    log_zombie_threads()
     audio_chunks.clear()
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -96,27 +101,15 @@ def start_recording():
         callback=audio_callback,
     )
     stream.start()
-    recording_timer = threading.Timer(MAX_RECORDING_SECONDS, on_recording_timeout)
+    recording_timer = threading.Timer(MAX_RECORDING_SECONDS, finish_recording)
     recording_timer.start()
-    log("Recording started.")
-
-
-def on_recording_timeout():
-    if stream is not None:
-        log("Recording timeout.")
-        finish_recording()
 
 
 def stop_recording():
-    global stream, recording_timer
-    if recording_timer is not None:
-        recording_timer.cancel()
-        recording_timer = None
-    if stream is not None:
-        stream.stop()
-        stream.close()
-        stream = None
-    log("Recording stopped.")
+    global recording, recording_timer
+    recording = False
+    recording_timer.cancel()
+    threading.Thread(target=stream.close, daemon=True, name="stream-close").start()
 
 
 def finish_recording():
@@ -139,7 +132,7 @@ def transcribe_and_type():
             return
         text = run_stt(audio)
         log(f"STT: {text}")
-        if ENABLE_POST_PROCESS:
+        if ENABLE_POST_PROCESS and text:
             text = post_process(text)
         if text:
             type_text(text)
@@ -164,9 +157,7 @@ def post_process(text):
         headers=headers,
         json={
             "model": LLM_MODEL,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
+            "messages": [{"role": "user", "content": prompt}],
             "stream": False,
         },
         timeout=LLM_TIMEOUT,
@@ -190,15 +181,15 @@ def type_text(text):
 
 
 def keyboard_event_callback(proxy, event_type, event, refcon):
-    keycode = Quartz.CGEventGetIntegerValueField(
-        event, Quartz.kCGKeyboardEventKeycode
-    )
+    keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
     if keycode != DICTATION_KEYCODE:
         return event
 
+    global dict_key_down, recording
     if event_type == Quartz.kCGEventKeyDown:
-        if stream is not None:
+        if dict_key_down:
             return None
+        dict_key_down = True
         if processing_thread is not None:
             beep(BEEP_BUSY)
             return None
@@ -207,8 +198,10 @@ def keyboard_event_callback(proxy, event_type, event, refcon):
         return None
 
     if event_type == Quartz.kCGEventKeyUp:
-        if stream is not None:
-            finish_recording()
+        if not dict_key_down:
+            return None
+        dict_key_down = False
+        recording and finish_recording()
         return None
 
     return event
