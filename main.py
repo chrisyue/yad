@@ -8,7 +8,7 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
-import sounddevice as sd
+import miniaudio
 import requests
 import Quartz
 import CoreFoundation
@@ -21,6 +21,7 @@ with CONFIG_PATH.open("rb") as f:
     config = tomllib.load(f)
 
 STT_MODEL_PATH = config["stt"]["model_path"]
+STT_SYS_PROMPT = config["stt"]["sys_prompt"]
 
 ENABLE_POST_PROCESS = config["llm"]["enabled"]
 LLM_URL = config["llm"]["url"]
@@ -47,7 +48,7 @@ def beep(path):
 
 
 stt_model = None
-stream = None
+capture_device = None
 recording_timer = None
 processing_thread = None
 audio_chunks = deque()
@@ -68,9 +69,7 @@ def load_models():
 
 
 def run_stt(audio):
-    result = stt_model.generate(
-        audio, use_itn=True, system_prompt="用户是程序员。Vocabulary: ornith, bonsai"
-    )
+    result = stt_model.generate(audio, use_itn=True, system_prompt=STT_SYS_PROMPT)
     if isinstance(result, str):
         return result
     if hasattr(result, "text"):
@@ -80,36 +79,36 @@ def run_stt(audio):
     return str(result)
 
 
-def audio_callback(indata, frames, time_info, status):
-    audio_chunks.append(indata.copy())
-
-
-def log_zombie_threads():
-    n = sum(1 for t in threading.enumerate() if t.name == "stream-close")
-    if n:
-        log(f"僵尸 close 线程: {n}")
+def audio_gen():
+    while True:
+        data = yield
+        if data:
+            audio_chunks.append(np.frombuffer(data, dtype=np.float32).copy())
 
 
 def start_recording():
-    global recording, stream, recording_timer
+    global recording, capture_device, recording_timer
     recording = True
-    log_zombie_threads()
     audio_chunks.clear()
-    stream = sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=CHANNELS,
-        callback=audio_callback,
-    )
-    stream.start()
+    if capture_device is None:
+        capture_device = miniaudio.CaptureDevice(
+            input_format=miniaudio.SampleFormat.FLOAT32,
+            nchannels=CHANNELS,
+            sample_rate=SAMPLE_RATE,
+            buffersize_msec=50,
+        )
+    g = audio_gen()
+    g.send(None)
+    capture_device.start(g)
     recording_timer = threading.Timer(MAX_RECORDING_SECONDS, finish_recording)
     recording_timer.start()
 
 
 def stop_recording():
-    global recording, recording_timer
+    global recording
     recording = False
     recording_timer.cancel()
-    threading.Thread(target=stream.close, daemon=True, name="stream-close").start()
+    threading.Thread(target=capture_device.stop, daemon=True).start()
 
 
 def finish_recording():
